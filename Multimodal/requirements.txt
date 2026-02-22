@@ -1,0 +1,51 @@
+# ==================== requirements.txt ====================
+# PyTorch深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Transformers和NLP
+transformers>=4.30.0
+tokenizers>=0.13.0
+sentencepiece>=0.1.99
+
+# 数据处理
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# 图像处理
+pillow>=10.0.0
+opencv-python>=4.8.0
+albumentations>=1.3.0
+
+# 深度学习工具
+einops>=0.6.1
+timm>=0.9.0
+
+# 进度条和日志
+tqdm>=4.65.0
+tensorboard>=2.13.0
+
+# 可视化
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# 配置文件处理
+pyyaml>=6.0
+
+# 数据存储
+h5py>=3.9.0
+
+# 可选：LoRA和量化（如果使用LLM微调）
+# accelerate>=0.20.0
+# bitsandbytes>=0.41.0
+# peft>=0.4.0
+
+# 可选：更多可视化工具
+# plotly>=5.14.0
+# wandb>=0.15.0
+
+# 可选：UMAP降维
+# umap-learn>=0.5.3
