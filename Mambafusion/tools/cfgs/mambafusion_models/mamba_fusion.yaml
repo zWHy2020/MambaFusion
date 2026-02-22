@@ -240,6 +240,15 @@ MODEL:
       # USE_VMAMBA: True
       IN_CHANNEL: 208
       OUT_CHANNEL: 128
+      USE_MODALITY_DROPOUT: False
+      P_CAM: 0.1
+      P_LIDAR: 0.05
+      USE_GATED_FUSION: False
+      USE_ALIGNMENT_PROXY: False
+      ALIGNMENT_PROXY_MODE: "none"
+      GATE_USE_MASK: True
+      GATE_HIDDEN_DIM: 128
+      GATE_PROJ_DIM: 64
 
 
     MAP_TO_BEV:

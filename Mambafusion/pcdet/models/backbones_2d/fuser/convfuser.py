@@ -8,6 +8,8 @@ import torch.utils.checkpoint as checkpoint
 import torch.nn.functional as F
 import os
 import numpy as np
+
+from .gated_fusion import ModalityDropout, GlobalGatedFusion
 class ConvFuser(nn.Module):
     def __init__(self,model_cfg) -> None:
         super().__init__()
@@ -33,6 +35,23 @@ class ConvFuser(nn.Module):
                 nn.ReLU(),
                 )
         self.use_vmamba = model_cfg.get('USE_VMAMBA', False)
+
+        self.use_modality_dropout = model_cfg.get('USE_MODALITY_DROPOUT', False)
+        self.use_gated_fusion = model_cfg.get('USE_GATED_FUSION', False)
+        self.use_alignment_proxy = model_cfg.get('USE_ALIGNMENT_PROXY', False)
+        self.alignment_proxy_mode = model_cfg.get('ALIGNMENT_PROXY_MODE', 'none')
+        self.gate_use_mask = model_cfg.get('GATE_USE_MASK', True)
+        self.modality_dropout = ModalityDropout(
+            p_cam=model_cfg.get('P_CAM', 0.0),
+            p_lidar=model_cfg.get('P_LIDAR', 0.0),
+        )
+        self.gated_fusion = GlobalGatedFusion(
+            hidden_dim=model_cfg.get('GATE_HIDDEN_DIM', 128),
+            use_alignment_proxy=self.use_alignment_proxy,
+            alignment_proxy_mode=self.alignment_proxy_mode,
+            gate_use_mask=self.gate_use_mask,
+            gate_proj_dim=model_cfg.get('GATE_PROJ_DIM', 64),
+        )
         self.use_checkpoint = model_cfg.get('USE_CHECKPOINT', True)
         self.use_merge_after = model_cfg.get('USE_MERGE_AFTER', False)
         if self.use_merge_after:
@@ -399,13 +418,22 @@ class ConvFuser(nn.Module):
         """
         img_bev = batch_dict['spatial_features_img']
         lidar_bev = batch_dict['spatial_features']
+
+        modality_mask = None
+        if self.use_modality_dropout:
+            img_bev, lidar_bev, modality_mask = self.modality_dropout(img_bev, lidar_bev)
+
         if self.use_vmamba:
             if self.use_checkpoint:
                 cat_bev = checkpoint.checkpoint(self.mamba_forward, img_bev, lidar_bev)
             else:
                 cat_bev = self.mamba_forward(img_bev, lidar_bev)
         else:
-            cat_bev = torch.cat([img_bev, lidar_bev], dim=1)
+            if self.use_gated_fusion:
+                cat_bev, gate_alpha = self.gated_fusion(img_bev, lidar_bev, modality_mask=modality_mask)
+                batch_dict['fusion_gate_alpha'] = gate_alpha
+            else:
+                cat_bev = torch.cat([img_bev, lidar_bev], dim=1)
         if self.use_merge_after:
             for block in self.merge_blocks:
                 cat_bev = block(cat_bev)
