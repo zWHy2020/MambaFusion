@@ -1,4 +1,4 @@
-from .gated_fusion import ModalityDropout, AlignmentProxy, GlobalGatedFusion
+from .gated_fusion import ModalityDropout, AlignmentProxy, GlobalGatedFusion, SparseMoESpatialGate
 from .convfuser import ConvFuser
 from .GlobalAlign import GlobalAlign
 __all__ = {
@@ -6,5 +6,6 @@ __all__ = {
     'GlobalAlign':GlobalAlign,
     'ModalityDropout': ModalityDropout,
     'AlignmentProxy': AlignmentProxy,
-    'GlobalGatedFusion': GlobalGatedFusion
+    'GlobalGatedFusion': GlobalGatedFusion,
+    'SparseMoESpatialGate': SparseMoESpatialGate
 }

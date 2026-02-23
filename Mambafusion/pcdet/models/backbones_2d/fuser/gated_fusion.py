@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 
 class ModalityDropout(nn.Module):
@@ -129,3 +129,77 @@ class GlobalGatedFusion(nn.Module):
             z_lidar * alpha[:, 1].view(-1, 1, 1, 1),
         ], dim=1)
         return z_fused, alpha
+
+
+class SparseMoESpatialGate(nn.Module):
+    """
+    Sparse MoE Top-K hard spatial gate with STE for Camera-LiDAR BEV features.
+
+    References:
+      - Shazeer et al., "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer"
+        https://arxiv.org/abs/1701.06538
+      - Gu et al., "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
+        https://arxiv.org/abs/2312.00752
+      - MoE-Mamba: https://arxiv.org/abs/2401.04081
+    """
+
+    def __init__(self, hidden_dim: int = 64, topk: int = 1, include_null_expert: bool = True):
+        super().__init__()
+        self.topk = int(topk)
+        self.include_null_expert = include_null_expert
+        self.num_experts = 3 if include_null_expert else 2  # [cam, lidar, null]
+        self.router = nn.Sequential(
+            nn.LazyLinear(hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, self.num_experts)
+        )
+
+    def _topk_hard_gate(self, probs: torch.Tensor) -> torch.Tensor:
+        topk = max(1, min(self.topk, probs.shape[-1]))
+        topk_idx = torch.topk(probs, k=topk, dim=-1).indices
+        hard_mask = torch.zeros_like(probs).scatter_(-1, topk_idx, 1.0)
+        sparse_probs = probs * hard_mask
+        # STE: forward uses hard Top-K sparse probabilities; backward uses selected probability path.
+        sparse_probs_ste = sparse_probs.detach() + (sparse_probs - sparse_probs.detach())
+        return sparse_probs_ste
+
+    def forward(
+        self,
+        z_cam: torch.Tensor,
+        z_lidar: torch.Tensor,
+        modality_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        bsz, _, h, w = z_cam.shape
+        x_cam = z_cam.permute(0, 2, 3, 1).reshape(bsz, h * w, -1)
+        x_lidar = z_lidar.permute(0, 2, 3, 1).reshape(bsz, h * w, -1)
+
+        token_feat = torch.cat([x_cam, x_lidar], dim=-1)
+        logits = self.router(token_feat)
+
+        if modality_mask is not None:
+            modality_mask = modality_mask.to(dtype=logits.dtype)
+            mask_logits = torch.zeros_like(logits)
+            mask_logits[..., 0] = (modality_mask[:, 0:1] - 1.0) * 1e4
+            mask_logits[..., 1] = (modality_mask[:, 1:2] - 1.0) * 1e4
+            logits = logits + mask_logits
+
+        probs = torch.softmax(logits, dim=-1)
+        gate = self._topk_hard_gate(probs)
+
+        gate_cam = gate[..., 0:1]
+        gate_lidar = gate[..., 1:2]
+        keep_mask = ((gate_cam + gate_lidar) > 0).to(dtype=z_cam.dtype)
+
+        xhat_cam = x_cam * gate_cam
+        xhat_lidar = x_lidar * gate_lidar
+
+        zhat_cam = xhat_cam.reshape(bsz, h, w, -1).permute(0, 3, 1, 2).contiguous()
+        zhat_lidar = xhat_lidar.reshape(bsz, h, w, -1).permute(0, 3, 1, 2).contiguous()
+        keep_mask_2d = keep_mask.reshape(bsz, h, w, 1).permute(0, 3, 1, 2).contiguous()
+
+        gate_stats = {
+            'router_prob': probs,
+            'router_gate': gate,
+            'keep_ratio': keep_mask.float().mean(dim=1),
+        }
+        return zhat_cam, zhat_lidar, keep_mask_2d, gate_stats
