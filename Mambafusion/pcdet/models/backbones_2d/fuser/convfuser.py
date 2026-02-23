@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import os
 import numpy as np
 
-from .gated_fusion import ModalityDropout, GlobalGatedFusion
+from .gated_fusion import ModalityDropout, SparseMoESpatialGate
 class ConvFuser(nn.Module):
     def __init__(self,model_cfg) -> None:
         super().__init__()
@@ -45,12 +45,10 @@ class ConvFuser(nn.Module):
             p_cam=model_cfg.get('P_CAM', 0.0),
             p_lidar=model_cfg.get('P_LIDAR', 0.0),
         )
-        self.gated_fusion = GlobalGatedFusion(
+        self.sparse_spatial_gate = SparseMoESpatialGate(
             hidden_dim=model_cfg.get('GATE_HIDDEN_DIM', 128),
-            use_alignment_proxy=self.use_alignment_proxy,
-            alignment_proxy_mode=self.alignment_proxy_mode,
-            gate_use_mask=self.gate_use_mask,
-            gate_proj_dim=model_cfg.get('GATE_PROJ_DIM', 64),
+            topk=model_cfg.get('SPARSE_GATE_TOPK', 1),
+            include_null_expert=model_cfg.get('SPARSE_GATE_INCLUDE_NULL_EXPERT', True),
         )
         self.use_checkpoint = model_cfg.get('USE_CHECKPOINT', True)
         self.use_merge_after = model_cfg.get('USE_MERGE_AFTER', False)
@@ -293,6 +291,9 @@ class ConvFuser(nn.Module):
                     mlp_drop_rate=0.0,
                     gmlp=False,
                 ))
+        if self.use_vmamba and model_cfg.get('RESET_VMAMBA_DT_BIAS', True):
+            self._ensure_negative_dt_bias(target_bias=model_cfg.get('VMAMBA_DT_BIAS_TARGET', -4.0))
+
     @staticmethod
     def _make_vmamba_layer(
         dim=96,
@@ -405,6 +406,16 @@ class ConvFuser(nn.Module):
                 blocks1=nn.Sequential(*blocks1),
                 blocks2=nn.Sequential(*blocks2),
             ))
+    def _ensure_negative_dt_bias(self, target_bias: float = -4.0):
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if 'dt_projs_bias' not in name:
+                    continue
+                if param.numel() == 0:
+                    continue
+                if torch.any(param >= 0):
+                    param.fill_(target_bias)
+
     def forward(self,batch_dict):
         """
         Args:
@@ -423,22 +434,31 @@ class ConvFuser(nn.Module):
         if self.use_modality_dropout:
             img_bev, lidar_bev, modality_mask = self.modality_dropout(img_bev, lidar_bev)
 
+        spatial_keep_mask = None
+        if self.use_gated_fusion:
+            img_bev, lidar_bev, spatial_keep_mask, gate_stats = self.sparse_spatial_gate(
+                img_bev, lidar_bev, modality_mask=modality_mask
+            )
+            batch_dict['fusion_gate_keep_ratio'] = gate_stats['keep_ratio']
+
         if self.use_vmamba:
             if self.use_checkpoint:
                 cat_bev = checkpoint.checkpoint(self.mamba_forward, img_bev, lidar_bev)
             else:
                 cat_bev = self.mamba_forward(img_bev, lidar_bev)
+            if spatial_keep_mask is not None:
+                cat_bev = cat_bev * spatial_keep_mask
         else:
-            if self.use_gated_fusion:
-                cat_bev, gate_alpha = self.gated_fusion(img_bev, lidar_bev, modality_mask=modality_mask)
-                batch_dict['fusion_gate_alpha'] = gate_alpha
-            else:
-                cat_bev = torch.cat([img_bev, lidar_bev], dim=1)
+            cat_bev = torch.cat([img_bev, lidar_bev], dim=1)
+            if spatial_keep_mask is not None:
+                cat_bev = cat_bev * spatial_keep_mask
         if self.use_merge_after:
             for block in self.merge_blocks:
                 cat_bev = block(cat_bev)
         mm_bev = self.conv(cat_bev) # [2, 128, 360, 360]
 
+        if spatial_keep_mask is not None:
+            batch_dict['fusion_spatial_keep_mask'] = spatial_keep_mask
         batch_dict['spatial_features'] = mm_bev
         return batch_dict
 
